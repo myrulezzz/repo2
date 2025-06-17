@@ -1,0 +1,45 @@
+name: 🔁 Sync Template Changes to Repos
+
+on:
+  push:
+    paths:
+      - '.github/pull_request_template.md'
+      - '.github/workflows/**'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout template
+        uses: actions/checkout@v3
+
+      - name: Setup Git
+        run: |
+          git config --global user.name 'Template Bot 🤖'
+          git config --global user.email 'template-bot@example.com'
+
+      - name: Sync with child repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          repos=("myrulezzz/repository_test1") # <-- Replace with your repos!
+          
+          for repo in "${repos[@]}"; do
+            echo "🔁 Syncing to $repo..."
+
+            git clone https://x-access-token:${GH_TOKEN}@github.com/$repo temp-repo
+            cd temp-repo
+
+            cp -r ../.github .github
+
+            git add .github
+            git commit -m "🔄 Sync updated templates" || echo "No changes"
+            git push origin HEAD:sync-template || echo "Push failed"
+
+            gh pr create --title "Update checklist from template 📋" \
+              --body "This PR updates the checklist from the template repository!" \
+              --base main --head sync-template || echo "PR already exists?"
+
+            cd ..
+            rm -rf temp-repo
+          done

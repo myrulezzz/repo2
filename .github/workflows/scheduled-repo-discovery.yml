@@ -1,0 +1,200 @@
+# .github/workflows/scheduled-repo-discovery.yml
+# This goes in your TEMPLATE repository
+# Automatically discovers and sets up new repositories created from this template
+
+name: 🔍 Discover New Template Repositories
+
+on:
+  schedule:
+    # Run every 6 hours to check for new repositories
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_setup:
+        description: 'Force setup even if listener exists'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  discover-repos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find repositories created from this template
+        id: find-repos
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.SYNC_TOKEN }}
+          script: |
+            const templateRepo = `${context.repo.owner}/${context.repo.repo}`;
+            console.log(`🔍 Scanning for repositories created from: ${templateRepo}`);
+            
+            // Search for repositories created from this template
+            const searchQuery = `template:${templateRepo}`;
+            const searchResults = await github.rest.search.repos({
+              q: searchQuery,
+              per_page: 100,
+              sort: 'created',
+              order: 'desc'
+            });
+            
+            const allRepos = searchResults.data.items
+              .map(repo => repo.full_name)
+              .filter(repo => repo !== templateRepo); // Exclude template itself
+            
+            console.log(`📊 Found ${allRepos.length} repositories from template`);
+            
+            // Check which ones need setup
+            const reposNeedingSetup = [];
+            const forceSetup = ${{ github.event.inputs.force_setup || false }};
+            
+            for (const repoFullName of allRepos) {
+              const [owner, repo] = repoFullName.split('/');
+              
+              try {
+                // Check if template listener exists
+                await github.rest.repos.getContent({
+                  owner,
+                  repo,
+                  path: '.github/workflows/template-update-listener.yml'
+                });
+                
+                if (forceSetup) {
+                  console.log(`🔄 ${repoFullName} - Force setup requested`);
+                  reposNeedingSetup.push(repoFullName);
+                } else {
+                  console.log(`✅ ${repoFullName} - Already configured`);
+                }
+              } catch (error) {
+                if (error.status === 404) {
+                  console.log(`❌ ${repoFullName} - Needs setup`);
+                  reposNeedingSetup.push(repoFullName);
+                } else {
+                  console.log(`⚠️ ${repoFullName} - Error checking: ${error.message}`);
+                }
+              }
+            }
+            
+            console.log(`🎯 Repositories needing setup: ${reposNeedingSetup.length}`);
+            return {
+              allRepos,
+              reposNeedingSetup
+            };
+            
+      - name: Setup template listeners
+        if: fromJSON(steps.find-repos.outputs.result).reposNeedingSetup.length > 0
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.SYNC_TOKEN }}
+          script: |
+            const { reposNeedingSetup } = ${{ steps.find-repos.outputs.result }};
+            
+            console.log(`🛠️ Setting up ${reposNeedingSetup.length} repositories...`);
+            
+            const listenerWorkflow = `name: 🔄 Template Update Listener
+
+on:
+  repository_dispatch:
+    types: [template-updated]
+
+jobs:
+  sync-template:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: \${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Log update notification
+        run: |
+          echo "🔄 Template update received!"
+          echo "Template repo: \${{ github.event.client_payload.template_repo }}"
+          echo "Update type: \${{ github.event.client_payload.update_type }}"
+          echo "Timestamp: \${{ github.event.client_payload.timestamp }}"
+          
+      - name: Download updated template files
+        env:
+          TEMPLATE_REPO: \${{ github.event.client_payload.template_repo }}
+        run: |
+          echo "📥 Downloading updated files from template..."
+          mkdir -p .github/workflows
+          
+          echo "Downloading pull_request_template.md..."
+          curl -H "Accept: application/vnd.github.v3.raw" \\
+               -L "https://api.github.com/repos/\${TEMPLATE_REPO}/contents/.github/pull_request_template.md" \\
+               -o .github/pull_request_template.md
+               
+          echo "Downloading enforce-checklist.yml..."
+          curl -H "Accept: application/vnd.github.v3.raw" \\
+               -L "https://api.github.com/repos/\${TEMPLATE_REPO}/contents/.github/workflows/enforce-checklist.yml" \\
+               -o .github/workflows/enforce-checklist.yml
+               
+          echo "✅ Files downloaded successfully"
+          
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet; then
+            echo "has_changes=false" >> \$GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> \$GITHUB_OUTPUT
+          fi
+          
+      - name: Create Pull Request with updates
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: \${{ secrets.GITHUB_TOKEN }}
+          commit-message: "🔄 Update template files"
+          title: '🔄 Template Updates: PR Checklist'
+          body: |
+            ## 🔄 Template Updates Available
+            This PR contains updates from the template repository.
+            **Please review and merge to stay in sync with template standards.** ✅
+          branch: template-updates-\${{ github.run_number }}
+          delete-branch: true`;
+            
+            const results = [];
+            
+            for (const repoFullName of reposNeedingSetup) {
+              const [owner, repo] = repoFullName.split('/');
+              
+              try {
+                // Create the listener workflow
+                const encodedContent = Buffer.from(listenerWorkflow).toString('base64');
+                
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner,
+                  repo,
+                  path: '.github/workflows/template-update-listener.yml',
+                  message: '🔄 Add template update listener workflow\n\nEnables automatic synchronization with template repository.',
+                  content: encodedContent
+                });
+                
+                console.log(`✅ Successfully set up: ${repoFullName}`);
+                results.push({ repo: repoFullName, status: 'success' });
+                
+              } catch (error) {
+                console.error(`❌ Failed to set up ${repoFullName}:`, error.message);
+                results.push({ repo: repoFullName, status: 'failed', error: error.message });
+              }
+            }
+            
+            // Summary
+            const successful = results.filter(r => r.status === 'success').length;
+            const failed = results.filter(r => r.status === 'failed').length;
+            
+            console.log(`\n📊 Setup Summary:`);
+            console.log(`✅ Successful: ${successful}`);
+            console.log(`❌ Failed: ${failed}`);
+            
+            return results;
+            
+      - name: Summary
+        run: |
+          echo "🔍 Repository Discovery Complete!"
+          echo "Found: ${{ fromJSON(steps.find-repos.outputs.result).allRepos.length }} total repositories"
+          echo "Setup needed: ${{ fromJSON(steps.find-repos.outputs.result).reposNeedingSetup.length }} repositories"
+          echo ""
+          echo "All repositories created from this template will now receive automatic updates! 🎉"

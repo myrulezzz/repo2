@@ -1,0 +1,109 @@
+# .github/workflows/dispatch-template-updates.yml
+name: 📡 Dispatch Template Updates
+
+on:
+  push:
+    paths:
+      - '.github/pull_request_template.md'
+      - '.github/workflows/enforce-checklist.yml'
+      - '.github/checklist-config.json'
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  notify-repos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get repositories using this template
+        id: get-repos
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.SYNC_TOKEN }}
+          script: |
+            const templateRepo = `${context.repo.owner}/${context.repo.repo}`;
+            console.log(`🔍 Searching for repositories created from template: ${templateRepo}`);
+            
+            try {
+              // Method 1: Search API (finds repos with template metadata)
+              const searchQuery = `template:${templateRepo}`;
+              const searchResults = await github.rest.search.repos({
+                q: searchQuery,
+                per_page: 100,
+                sort: 'created',
+                order: 'desc'
+              });
+              
+              let allRepos = searchResults.data.items.map(repo => repo.full_name);
+              console.log(`📊 Found ${allRepos.length} repos via search API`);
+              
+              // Method 2: Get organization repos and check for template usage
+              if (context.repo.owner !== context.actor) {
+                try {
+                  const orgRepos = await github.rest.repos.listForOrg({
+                    org: context.repo.owner,
+                    per_page: 100,
+                    sort: 'created',
+                    direction: 'desc'
+                  });
+                  
+                  // Check each repo for template reference
+                  for (const repo of orgRepos.data) {
+                    if (repo.template_repository && repo.template_repository.full_name === templateRepo) {
+                      if (!allRepos.includes(repo.full_name)) {
+                        allRepos.push(repo.full_name);
+                        console.log(`➕ Added ${repo.full_name} from org repos`);
+                      }
+                    }
+                  }
+                } catch (orgError) {
+                  console.log('⚠️ Could not access org repos (permissions may be limited)');
+                }
+              }
+              
+              // Remove the template repository itself from the list
+              allRepos = allRepos.filter(repo => repo !== templateRepo);
+              
+              console.log(`🎯 Final repository list (${allRepos.length} repos):`);
+              allRepos.forEach(repo => console.log(`  - ${repo}`));
+              
+              return allRepos;
+            } catch (error) {
+              console.error('❌ Error searching repositories:', error);
+              return [];
+            }
+            
+      - name: Dispatch update events
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.SYNC_TOKEN }}
+          script: |
+            const repos = ${{ steps.get-repos.outputs.result }};
+            console.log(`Dispatching events to ${repos.length} repositories`);
+            
+            for (const repoFullName of repos) {
+              const [owner, repo] = repoFullName.split('/');
+              
+              try {
+                await github.rest.repos.createDispatchEvent({
+                  owner,
+                  repo,
+                  event_type: 'template-updated',
+                  client_payload: {
+                    template_repo: context.repo.full_name,
+                    updated_files: [
+                      '.github/pull_request_template.md',
+                      '.github/workflows/enforce-checklist.yml'
+                    ],
+                    timestamp: new Date().toISOString(),
+                    update_type: 'checklist-update'
+                  }
+                });
+                
+                console.log(`✅ Successfully notified ${repoFullName}`);
+              } catch (error) {
+                console.error(`❌ Failed to notify ${repoFullName}:`, error.message);
+              }
+            }
+            
+            console.log('🎉 Dispatch complete!');

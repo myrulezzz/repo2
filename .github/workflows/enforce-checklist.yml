@@ -1,0 +1,21 @@
+name: ✅ Enforce PR Checklist
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  checklist:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check checklist in PR description
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const body = context.payload.pull_request.body;
+            const unchecked = body.match(/\[ \]/g); // Finds unchecked boxes
+            if (unchecked) {
+              core.setFailed(`🚨 Please complete all checklist items before review!`);
+            } else {
+              console.log("✅ All checklist items are complete!");
+            }
